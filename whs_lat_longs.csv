@@ -1,9 +1,0 @@
-City,State,addr,latitude,longitude,geo_method
-Pittsburg,PA,"Pittsburg, PA",40.4416941,-79.9900861,osm
-Richmond,VA,"Richmond, VA",37.5385087,-77.43428,osm
-Charleston,SC,"Charleston, SC",32.7876012,-79.9402728,osm
-Raleigh,NC,"Raleigh, NC",35.7803977,-78.6390989,osm
-Charlotte,NC,"Charlotte, NC",35.2272,-80.843083,osm
-Atlanta,GA,"Atlanta, GA",33.7490987,-84.3901849,osm
-Dallas,TX,"Dallas, TX",32.7762719,-96.7968559,osm
-Seattle,WA,"Seattle, WA",47.6038321,-122.3300624,osm
