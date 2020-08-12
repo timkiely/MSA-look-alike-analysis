@@ -1,0 +1,519 @@
+---
+title: "Look-Alike MSA Analysis"
+output: github_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+# Look-Alike Analysis for U.S. Markets
+
+Sometimes known as "Whitespace" analysis, a typical geo-spatial question we might want to answer is: what new markets "look like" my current markets, or my high-performing markets?  
+
+In this example, we simulate a business with high-performing operations in 7 U.S. citites, and then score all U.S. MSAs (metropolitan statistical area / micropolitan statistical area) in terms of how "similar"/"dissimilar" they are according to a handful of common variables from the U.S. census (household income, median age, etc.). 
+
+# 0.0 LIBRARIES
+
+```{r}
+
+# WORKING WITH DATA: 
+library(tidyverse) # data manipulation
+library(sf) # work with spatial data
+library(doFuture) # parallelization 
+
+# SOURCING DATA: 
+library(tidygeocoder) # geocode addresses using OSM and census APIs
+library(tidycensus) # source census ACS data
+library(tigris); options(tigris_use_cache = TRUE) # for sourcing geographical shapefiles
+
+# PLOTTING AND MAPPING:
+library(maps) # for plotting maps
+library(ggrepel) # for plotting labels on maps
+suppressPackageStartupMessages(library(tidyquant)) # I like the color palettes in this package
+
+```
+
+# 1.0 DEFINE CURRENT MARKETS
+
+In this exercise, we're going to imagine we are analyzing a business  with operations in 7 US towns/cities.  
+Below, we are writing our the names of the cities, then geo-coding them with lat-lon coordinates. 
+
+```{r}
+
+# Define Markets:
+
+sample_cities <- 
+  tribble(~City,	~State
+          , "Pittsburg",	"PA"
+          , "Richmond",	"VA"
+          , "Charleston",	"SC"
+          , "Raleigh",	"NC"
+          , "Charlotte",	"NC"
+          , "Atlanta",	"GA"
+          , "Dallas",	"TX"
+          , "Seattle", "WA"
+          )
+
+sample_cities
+
+```
+
+
+Geo-code the cities then plot on a map. 
+
+
+```{r}
+
+# cache the geo-coded cities so you only have to run this once: 
+
+if(!file.exists("lat_longs.csv")){
+
+  lat_longs <- 
+    sample_cities %>%
+    mutate(addr=paste0(City, ", ",State)) %>% 
+    tidygeocoder::geocode(addr, method = 'cascade', lat = latitude , long = longitude)
+  
+  write_csv(lat_longs,"lat_longs.csv")
+  
+} else {
+  
+  lat_longs <- read_csv("lat_longs.csv", col_types = cols())
+  
+}
+
+
+
+ggplot(lat_longs, aes(longitude, latitude), color="grey99") +
+  geom_point()+
+  borders("state") + geom_point() + 
+  geom_label_repel(aes(label = addr)) + 
+  theme_void()
+
+```
+
+
+Next, intersect our geo-coded cities with MSA shapefiles, sourced using the `tigris` package.
+
+
+```{r}
+
+lat_longs_sf <- lat_longs %>% st_as_sf(coords = c("longitude","latitude"), crs = 4326)
+
+msa_sf <- 
+  tigris::core_based_statistical_areas(class = "sf") %>% 
+  select(GEOID, "MSA_NAME" = NAME, geometry) %>% 
+  st_transform(4326)
+
+# joining using st_intersection from the sf package
+
+Cities_Joined_to_MSA <- 
+  st_intersection(lat_longs_sf, msa_sf) %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(msa_sf, by = c("GEOID", "MSA_NAME")) %>% 
+  st_as_sf()
+
+Cities_Joined_to_MSA %>% 
+  ggplot() +
+  borders("state") + 
+  geom_sf(fill = palette_light()[2])+
+  geom_point(data = lat_longs, aes(x = longitude, y = latitude))+
+  geom_label_repel(data = lat_longs, aes(x = longitude, y = latitude, label = addr)
+                   , force = 10) + 
+  theme_void()
+
+```
+
+
+# 2.0 SOURCE CENSUS DATA 
+
+Chosen (somewhat) arbitrarily, here are the variables we're after: 
+
+- Population (& Population Density (/sq miles))
+- # Population 65+ (& % of Population 65+)
+- Median  Household Income
+- Median Age
+- Owner-Occupied Housing Unit Rate
+- Median Home Value
+- Unemployment Rate
+
+
+## 2.1 Exploring Census Variables
+
+
+Using the `tidycensus` package, we can source these variables IF we know the census code for each. Luckily, `tidycensus` comes with a dictionary of ACS variable names and codes. I _highly_ recommend copying the dictionary to your clipboard and pasting into Excel. 
+
+
+```{r}
+
+v18 <- load_variables(2018, "acs5", cache = TRUE)
+
+## 1. inspect using the Viewer:
+# v18 %>% View()
+
+## 2. copy to clipboard and paste into Excel: 
+# v18 %>% clipr::write_clip()
+
+v18
+
+```
+
+
+Once you've located your variables, store them in a named-list. To save space I've stored my desired variable codes in a separate script `99-Store ACS Var Names.R` so I can source is below. You can source all variable at once but for convinience of working with the data I've created three "sets": Age, Unemployment and Other. 
+
+```{r}
+
+acs_var_list <- source("99-Store ACS Var Names.r")[["value"]]
+
+names(acs_var_list)
+
+```
+
+
+Here's an example of what the "Age" variables look like: 
+
+```{r}
+
+head(acs_var_list$`Age Variables`, 10)
+
+```
+
+## 2.2 Calling the Census API
+
+### Age: 
+
+```{r}
+(
+  msa_age <- 
+    get_acs(geography = "metropolitan statistical area/micropolitan statistical area"
+            , year = 2018
+            , survey = "acs5"
+            , variables = acs_var_list$`Age Variables` 
+            , geometry = F
+            , cache = T
+    ) %>% 
+    select(GEOID, variable, estimate) %>% 
+    spread(variable, estimate) %>% 
+    select(GEOID, one_of(names(acs_var_list$`Age Variables`))) %>% 
+    mutate(Age_65_up = rowSums(select(., Male_65_66:Male_85_up, Female_65_66:Female_85_up))
+           , Percent_Over_65 = Age_65_up/Total_Population)
+)
+
+```
+
+
+### Unemployment: 
+
+
+```{r}
+
+(
+  msa_employment <- 
+    get_acs(geography = "metropolitan statistical area/micropolitan statistical area"
+            , year = 2018
+            , survey = "acs5"
+            , variables = acs_var_list$`Unemployment Variables`
+            , geometry = F
+            , cache = T
+    ) %>% 
+    select(GEOID, variable, estimate) %>% 
+    spread(variable, estimate) %>% 
+    select(GEOID, one_of(names(acs_var_list$`Unemployment Variables`))) %>% 
+    mutate(Total_Unemployed = rowSums(select(.,contains("Unemployed")), na.rm = T)
+           , Labor_Force = rowSums(select(., contains("labor_force")), na.rm = T)
+           , Unemployment_Rate = Total_Unemployed/Labor_Force)
+)
+
+
+```
+
+
+### Other: 
+
+
+```{r}
+
+(
+  msa_other <- 
+    get_acs(geography = "metropolitan statistical area/micropolitan statistical area"
+            , year = 2018
+            , survey = "acs5"
+            , variables = acs_var_list$`Other ACS Variables`
+            , geometry = F
+            , cache = T
+    ) %>% 
+    select(GEOID, variable, estimate) %>% 
+    spread(variable, estimate) %>% 
+    select(GEOID, one_of(names(acs_var_list$`Other ACS Variables`))) %>% 
+    mutate(Owner_Occupied_Rate = Owner_Occupied_units / Housing_units)
+)
+
+
+```
+
+
+## 2.3 Combine Census Data
+
+
+```{r}
+
+MSA_WITH_TARGET_MAKRETS <- 
+  
+  # Age census data: 
+  select(msa_age, GEOID, Percent_Over_65) %>% 
+  
+  # Unemployment census data: 
+  left_join(
+    select(msa_employment, GEOID, Unemployment_Rate)
+    , by = "GEOID") %>% 
+  
+  # Other census data: 
+  left_join(
+    select(msa_other, GEOID, Total_Population:Median_age, Housing_units, Owner_Occupied_Rate)
+    , by = "GEOID") %>% 
+  
+  # MSA shapefile data (for mapping)
+  left_join(msa_sf
+            , by = "GEOID") %>% 
+  
+  # Convert to spatial sf object and calculate land area
+  st_as_sf() %>% 
+  mutate(Area = st_area(geometry)
+         , Area = units::set_units(Area, mi^2)
+         ) %>% 
+  
+  # Calculate density variables (e.g. pop/sq mile)
+  mutate(Pop_Per_Sq_Mile = as.numeric(Total_Population/Area)
+         , Housing_Units_Per_Sq_Mile = as.numeric(Housing_units / Area)) %>% 
+  
+  # convert back to dataframe
+  st_set_geometry(NULL) %>% 
+  
+  # remove vestigal variables
+  select(-Area, -MSA_NAME) %>%
+  
+  # Identify our current markets with the variable TARGET_MARKET
+  mutate(TARGET_MARKET = ifelse(GEOID %in% Cities_Joined_to_MSA$GEOID, 1, 0))
+
+
+# did we successfully map all of our target markets to the full dataset?
+count(MSA_WITH_TARGET_MAKRETS, TARGET_MARKET)
+
+```
+
+
+```{r}
+
+glimpse(MSA_WITH_TARGET_MAKRETS)
+
+```
+
+
+# 3.0 STANDARDIZE VARIABLES
+
+We want to calculate a distance metric for new MSAs from our current MSAs, but there is a high degree of variability between features in the data. For example, `Total Population` can vary widely while `Percent of People >65 Years Old` can only have values 0-1.
+
+```{r}
+
+summary(MSA_WITH_TARGET_MAKRETS$Total_Population)
+
+
+```
+
+
+We need to _standardize_ the features so that no one variable has too much effect on the distance scoring. To do that, using `base::scale` we will subtract the mean and divide by the standard deviation so that each variable has a mean of 0 and an SD of 1. 
+
+
+```{r}
+MSA_WITH_TARGET_MAKRETS_STANDARDIZED <- 
+  MSA_WITH_TARGET_MAKRETS %>% 
+  mutate_at(vars(Percent_Over_65:Housing_Units_Per_Sq_Mile), function(x) as.numeric(scale(x, center = T, scale = T)))
+
+summary(MSA_WITH_TARGET_MAKRETS_STANDARDIZED$Total_Population)
+```
+
+
+# 4.0 CALCULATE DISSIMILARITY 
+
+Our dissimilarity score (or similarity score, either works) is defined as the total absolute difference between each variable in a new MSA and all variables in all current MSAs. This is very similar to a `K-NN` calculation. We could of course vary the dissimilairty scoring any number of ways: changing the underlying markets we're comparing to, changing the weighting of the variables or including different variables altogether.  
+
+Down the road, we might want to build this scoring into an app so that a user could try different variable weights / compare to different markets. Since that's the case, we'll take an extra step here to try and speed up the distance calculation a bit through some parallelization using the `doFuture` package. 
+
+
+```{r, message = T}
+
+TARGET_MAKRETS <- MSA_WITH_TARGET_MAKRETS_STANDARDIZED %>% filter(TARGET_MARKET==1) %>% select(-TARGET_MARKET)
+NON_TARGET_MAKRETS <- MSA_WITH_TARGET_MAKRETS_STANDARDIZED %>% filter(TARGET_MARKET==0) %>% select(-TARGET_MARKET)
+
+# optimizing for the speed of our distance calculation later, 
+# it's easiest to construct a dataframe where each row of the NON_TARGET_MARKET
+# dataframe is replicated nrow(TARGET_MARKET) times
+NON_TARGET_MAKRETS_rows_replicated <- 
+  replicate(n = nrow(TARGET_MAKRETS)
+            , expr = NON_TARGET_MAKRETS, simplify = F) %>% 
+  bind_rows()
+
+message(nrow(NON_TARGET_MAKRETS)," rows replicated to ",  nrow(NON_TARGET_MAKRETS_rows_replicated))
+
+```
+
+
+
+```{r}
+
+# NOTE: parallelization cuts the scoring time from ~30 seconds sequential to under 10
+# this would be important if we built this into an app where you could weight and re-score MSAs
+
+registerDoFuture()
+# plan(sequential) # equivalent to registerDoSeq
+plan(multiprocess, .skip = T)
+
+tictoc::tic()
+out <- foreach(i = 1:nrow(NON_TARGET_MAKRETS)
+               , .verbose = F # set this to T if you'd like to monitor progress
+               ) %dopar% {
+  # i <- 1
+  #message(i," of ", nrow(NON_WSH_MAKRETS))
+  the_geoid <- NON_TARGET_MAKRETS[[i,"GEOID"]]
+  row_frame <- NON_TARGET_MAKRETS_rows_replicated %>% filter(GEOID==the_geoid)
+  
+  export_out <- 
+    c(GEOID = the_geoid, 
+      colSums(abs(select_if(TARGET_MAKRETS, is.numeric) - 
+                    select_if(row_frame, is.numeric)))
+      )
+  export_out
+    
+}
+
+all_distances <-   
+  out %>% 
+  purrr::map({~.x %>% 
+      enframe() %>% 
+      spread(name, value)
+  }) %>% 
+  bind_rows() %>% 
+  mutate_at(vars(-GEOID), as.numeric) %>% 
+  mutate(Total_Dist = rowSums(select_if(., is.numeric))) %>% 
+  left_join(msa_sf, by = "GEOID") %>% 
+  mutate(State = str_sub(MSA_NAME,start = -2, end = -1))
+
+
+plan(sequential) # turns off background workers
+tictoc::toc()
+
+```
+
+```{r}
+
+all_distances
+
+```
+
+
+# 5.0 PLOT DISSIMILARITY SCORES
+
+
+Below is the output of our analysis. As we can see, there are outliers in the dissimilarity scores, caused primarily by the New York and L.A. metro areas. 
+
+
+```{r}
+
+all_distances %>% 
+  filter(!State %in% c("AK","HI","PR")) %>% 
+  st_as_sf() %>% 
+  ggplot()+
+  geom_sf(aes(fill = Total_Dist))+
+  geom_sf(data = Cities_Joined_to_MSA, fill = palette_light()[6], color = "black", size = 1)+
+  borders("state")+
+  scale_fill_gradient(low = palette_light()[3] 
+                       , high = palette_light()[2] 
+                       )+
+  theme_void()+
+  labs(fill = "Distance Score\n(Lower = More Similar)"
+       , title = "Similarity scores for new MSAs"
+       , subtitle = "Blue = current MSAs")
+```
+
+
+To adjust for outliers, rather than removing them, we bucket the dissimilarity scores into deciles.  
+
+
+```{r}
+
+all_distances %>% 
+  mutate(Distance_Bucket = ntile(Total_Dist, 10)) %>% 
+  filter(!State %in% c("AK","HI","PR")) %>% 
+  st_as_sf() %>% 
+  ggplot()+
+  geom_sf(aes(fill = Distance_Bucket))+
+  geom_sf(data = Cities_Joined_to_MSA, fill = palette_light()[6], color = "black", size = 1)+
+  borders("state")+
+  scale_fill_gradient(low = palette_light()[3] 
+                       , high = palette_light()[2] 
+                       )+
+  theme_void()+
+  labs(fill = "Distance Score\n(Lower = More Similar)"
+       , title = "Similarity scores for new MSAs"
+       , subtitle = "Blue = current MSAs")
+
+```
+
+
+# 6.0 DRIVERS OF SIMILARITY
+
+Finally, we may want to understand which variables are contributing most to our dissimilarity scores. To do that, we can use linear regression to parse out the effects of the variables on the dissimilarity scores.  
+
+Recall that a higher coeficient below corresponds to more dissimilarity, while a negative coeficient means more similarity. Below, we see that higher population, unemployment, and older populations drive dissimilarity, while onwer occupancy, housing density, and median household income drive similarity. 
+
+
+```{r}
+
+distance_scores <- 
+  all_distances %>% 
+  select(GEOID, Total_Dist) %>% 
+  mutate(Distance_Bucket = ntile(Total_Dist, 10))
+
+options(scipen = 999)
+MSA_WITH_TARGET_MAKRETS %>% 
+  filter(TARGET_MARKET==0) %>% 
+  left_join(distance_scores, by = 'GEOID') %>% 
+  select(-Distance_Bucket, -GEOID, -TARGET_MARKET) %>% 
+  lm(Total_Dist~., data = .) %>% 
+  summary() %>% 
+  print() %>% 
+  broom::tidy() %>% 
+  filter(p.value<0.05) %>% 
+  arrange(estimate)
+
+```
+
+Owner occupied rate has one of the largest coeficients and strongest linear relationships. Plotting that below: 
+
+```{r}
+
+MSA_WITH_TARGET_MAKRETS %>% 
+  filter(TARGET_MARKET==0) %>% 
+  left_join(distance_scores, by = 'GEOID') %>% 
+  select(-Distance_Bucket, -GEOID, -TARGET_MARKET) %>% 
+  ggplot()+
+  aes(Owner_Occupied_Rate, Total_Dist)+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  theme_tq()+
+  labs(x = "Owner Occupied Rate"
+       , y = "Dissimilarity Score"
+       , title = "MSAs with higher By-Owner Occupancy Rates are Similar to Our Current MSAs")
+
+```
+
+
+
+
+

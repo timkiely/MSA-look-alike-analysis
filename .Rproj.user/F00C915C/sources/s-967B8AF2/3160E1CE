@@ -1,0 +1,26 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1597248655545.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "3413012209",
+    "id" : "3160E1CE",
+    "lastKnownWriteTime" : 1597249572,
+    "last_content_update" : 1597249572609,
+    "path" : "C:/Users/tkiely/Box/Tim Kiely/Projects/R Examples/Look-Alike MSA Selection/99-Store ACS Var Names.R",
+    "project_path" : "99-Store ACS Var Names.R",
+    "properties" : {
+        "cursorPosition" : "92,0",
+        "scrollLine" : "30",
+        "tempName" : "Untitled1"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 2,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}
