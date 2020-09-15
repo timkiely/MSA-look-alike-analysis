@@ -138,7 +138,7 @@ Chosen (somewhat) arbitrarily, here are the variables we’re after:
 
   - Population (& Population Density (/sq miles))
 
-  - # Population 65+ (& % of Population 65+)
+  - Population 65+ (& % of Population 65+)
 
   - Median Household Income
 
